@@ -153,6 +153,23 @@ impl Metadata21 {
                 }
             }
 
+            // until pyproject_toml supports pyproject_toml::LicenseFiles
+            // assume the PEP 639 default
+            // license-files.globs = ["LICEN[CS]E*", "COPYING*", "NOTICE*", "AUTHORS*"]
+            let license_include_targets = ["LICEN[CS]E*", "COPYING*", "NOTICE*", "AUTHORS*"];
+            for pattern in license_include_targets {
+                println!("📦 Including license files matching \"{}\"", pattern);
+                for source in glob::glob(&manifest_path.join(pattern).to_string_lossy())
+                    .expect("No license files found for pattern")
+                    .filter_map(Result::ok)
+                {
+                    let license_path = manifest_path.join(source);
+                    if !self.license_files.contains(&license_path) {
+                        self.license_files.push(license_path);
+                    }
+                }
+            }
+
             if let Some(authors) = &project.authors {
                 let mut names = Vec::with_capacity(authors.len());
                 let mut emails = Vec::with_capacity(authors.len());

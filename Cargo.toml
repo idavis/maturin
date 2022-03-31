@@ -49,6 +49,7 @@ once_cell = "1.7.2"
 rustc_version = "0.4.0"
 target-lexicon = "0.12.0"
 pyproject-toml = { git = "https://github.com/idavis/pyproject-toml-rs", branch="pep639-license-fields" }
+spdx = "0.8.1"
 python-pkginfo = "0.5.3"
 textwrap = "0.15.0"
 ignore = "0.4.18"

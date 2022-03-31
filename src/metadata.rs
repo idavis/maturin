@@ -1,8 +1,10 @@
 use crate::{CargoToml, PyProjectToml};
 use anyhow::{bail, Context, Result};
 use fs_err as fs;
+use pyproject_toml::LicenseFiles;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
+use spdx::Expression;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::str;
@@ -44,7 +46,7 @@ pub struct Metadata21 {
     pub maintainer: Option<String>,
     pub maintainer_email: Option<String>,
     pub license: Option<String>,
-    // https://peps.python.org/pep-0639/#license-file-multiple-use
+    pub license_expression: Option<String>,
     pub license_files: Vec<PathBuf>,
     pub classifiers: Vec<String>,
     pub requires_dist: Vec<String>,
@@ -150,25 +152,30 @@ impl Metadata21 {
                 }
                 if let Some(license_text) = text {
                     self.license = Some(license_text.clone());
-                }
-            }
 
-            // until pyproject_toml supports pyproject_toml::LicenseFiles
-            // assume the PEP 639 default
-            // license-files.globs = ["LICEN[CS]E*", "COPYING*", "NOTICE*", "AUTHORS*"]
-            let license_include_targets = ["LICEN[CS]E*", "COPYING*", "NOTICE*", "AUTHORS*"];
-            for pattern in license_include_targets {
-                println!("📦 Including license files matching \"{}\"", pattern);
-                for source in glob::glob(&manifest_path.join(pattern).to_string_lossy())
-                    .expect("No license files found for pattern")
-                    .filter_map(Result::ok)
-                {
-                    let license_path = manifest_path.join(source);
-                    if !self.license_files.contains(&license_path) {
-                        self.license_files.push(license_path);
+                    // If the contents of the license.text PEP 621 source metadata key
+                    // is a valid license expression and the license-expression key
+                    // is listed as dynamic, fill the License-Expression field.
+                    if project.license_expression.is_none() {
+                        if Expression::parse(license_text).is_ok() {
+                            eprintln!("⚠️  Warning: License-Expression field populated from deprecated license.text field. Please update the project source metadata accordingly with the indicated license expression: {}", license_text);
+                            self.license_expression = Some(license_text.clone());
+                        }
                     }
                 }
             }
+
+            self.license_expression = project.license_expression.clone();
+
+            validate_licenses(&self.license, &self.license_expression)?;
+
+            if let Some(license_files) = project.license_files.as_ref() {
+                self.add_resolved_licenses(license_files, manifest_path);
+            } else {
+                self.add_resolved_licenses(&LicenseFiles::default(), manifest_path);
+            }
+
+            validate_license_files(&self.license_files)?;
 
             if let Some(authors) = &project.authors {
                 let mut names = Vec::with_capacity(authors.len());
@@ -227,6 +234,7 @@ impl Metadata21 {
             if let Some(classifiers) = &project.classifiers {
                 self.classifiers = classifiers.clone();
             }
+            validate_classifiers(&self.classifiers)?;
 
             if let Some(urls) = &project.urls {
                 self.project_url = urls.clone();
@@ -271,6 +279,46 @@ impl Metadata21 {
             }
         }
         Ok(())
+    }
+
+    fn add_resolved_licenses(&mut self, license_files: &LicenseFiles, manifest_path: &Path) {
+        match license_files {
+            LicenseFiles::Paths(paths_option) => {
+                if let Some(paths) = paths_option {
+                    for path in paths {
+                        println!("📦 Including license file \"{}\"", path);
+                        let license_path = manifest_path.join(path);
+                        if !self.license_files.contains(&license_path) {
+                            self.license_files.push(license_path);
+                        }
+                    }
+                }
+            }
+            LicenseFiles::Globs(glob_option) => {
+                if let Some(globs) = glob_option {
+                    self.add_resolved_license_globs(&globs, manifest_path);
+                }
+            }
+        }
+    }
+
+    fn add_resolved_license_globs(
+        &mut self,
+        license_include_targets: &Vec<String>,
+        manifest_path: &Path,
+    ) {
+        for pattern in license_include_targets.iter() {
+            println!("📦 Including license files matching \"{}\"", pattern);
+            for license_path in glob::glob(&manifest_path.join(pattern).to_string_lossy())
+                .expect("No license files found for pattern")
+                .filter_map(Result::ok)
+            {
+                println!("📦 Including license file \"{}\"", license_path.display());
+                if !self.license_files.contains(&license_path) {
+                    self.license_files.push(license_path);
+                }
+            }
+        }
     }
 
     /// Uses a Cargo.toml to create the metadata for python packages
@@ -368,7 +416,7 @@ impl Metadata21 {
             author_email,
             license: cargo_toml.package.license.clone(),
             license_files: Vec::new(),
-
+            license_expression: None,
             // Values provided through `[project.metadata.maturin]`
             classifiers,
             maintainer: extra_metadata.maintainer,
@@ -443,6 +491,7 @@ impl Metadata21 {
         add_option("Maintainer", &self.maintainer);
         add_option("Maintainer-email", &self.maintainer_email);
         add_option("License", &self.license.as_deref().map(fold_header));
+        add_option("License-Expression", &self.license_expression);
         add_option("Requires-Python", &self.requires_python);
         add_option("Description-Content-Type", &self.description_content_type);
         // Project-URL is special
@@ -512,6 +561,64 @@ impl Metadata21 {
             &self.get_version_escaped()
         ))
     }
+}
+
+fn validate_licenses(license: &Option<String>, license_expression: &Option<String>) -> Result<()> {
+    match (license.is_some(), license_expression.is_some()) {
+        (true, true) => {
+            let license_text = license.as_ref().unwrap().trim();
+            let license_expression_text = license_expression.as_ref().unwrap().trim();
+            if license_text != license_expression_text {
+                bail!("The deprecated License field and the recommended License-Expression field are used but have different values.");
+            }
+            if let Err(parse_error) = Expression::parse(license_expression_text) {
+                eprintln!("⚠️  Warning: License-Expression field could not be parsed: {}.", parse_error);
+            }
+        },
+        (true, false) => eprintln!("⚠️  Warning: The License field is deprecated and License-Expression field should be used instead."),
+        (false, true) => {
+            let license_expression_text = license_expression.as_ref().unwrap().trim();
+            if let Err(parse_error) = Expression::parse(license_expression_text){
+                eprintln!("⚠️  Warning: License-Expression field could not be parsed: {}.", parse_error);
+            }
+        },
+        (false, false) => eprintln!("⚠️  Warning: The License-Expression field is missing."),
+    };
+    Ok(())
+}
+
+fn validate_license_files(license_files: &Vec<PathBuf>) -> Result<()> {
+    if license_files.is_empty() {
+        eprintln!("⚠️  Warning: No License-File found");
+    }
+    if license_files.iter().any(|file| {
+        file.to_owned()
+            .into_os_string()
+            .into_string()
+            .unwrap()
+            .contains("..")
+    }) {
+        bail!("License-File path must not contain parent directory indicators (..)")
+    }
+    if license_files.iter().any(|file| {
+        file.to_owned()
+            .into_os_string()
+            .into_string()
+            .unwrap()
+            .contains("..")
+    }) {
+        bail!("License-File path must not contain parent directory indicators (..)")
+    }
+    Ok(())
+}
+
+fn validate_classifiers(classifiers: &Vec<String>) -> Result<()> {
+    for classifier in classifiers.iter() {
+        if classifier.contains("License :: OSI Approved") {
+            eprintln!("⚠️  Warning: Legacy license classifier ({}) found. Please adopt the License-Expression field with the appropriate SPDX license identifiers.", classifier);
+        }
+    }
+    Ok(())
 }
 
 /// Fold long header field according to RFC 5322 section 2.2.3

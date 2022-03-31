@@ -1502,11 +1502,10 @@ dependencies = [
 [[package]]
 name = "pyproject-toml"
 version = "0.3.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "380405edf78a88a5789f6f19ec9b76de091b5dce31eddb7a43a7386814aaa8fb"
+source = "git+https://github.com/idavis/pyproject-toml-rs?branch=pep639-license-fields#832e82bfc135a6f2648c8f8a2610f68c41800f1d"
 dependencies = [
  "serde",
- "toml",
+ "toml_edit",
 ]
 
 [[package]]
